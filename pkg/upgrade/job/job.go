@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -260,7 +261,7 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 	}
 
 	// After the Job has been created and registered as in-progress in the Plan Status,
-	// update parallelism to 1 to unpause it.  Ref: https://github.com/rancher/system-upgrade-controller/issues/134
+	// update parallelism to 1 to unpause it. Ref: https://github.com/rancher/system-upgrade-controller/issues/134
 	if slices.Contains(plan.Status.Applying, nodeHostname) {
 		*job.Spec.Parallelism = 1
 	}
@@ -281,7 +282,7 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 	}
 
 	podTemplate := &job.Spec.Template
-	// setup secrets volumes
+	// Setup secrets volumes
 	for _, secret := range plan.Spec.Secrets {
 		podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
 			Name: name.SafeConcatName("secret", secret.Name),
@@ -294,7 +295,7 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 		})
 	}
 
-	// add volumes from upgrade plan
+	// Add volumes from upgrade plan
 	for _, v := range plan.Spec.Upgrade.Volumes {
 		podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
 			Name: v.Name,
@@ -306,21 +307,33 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 		})
 	}
 
-	// first, we prepare
-	if plan.Spec.Prepare != nil {
-		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers,
-			upgradectr.New("prepare", *plan.Spec.Prepare,
-				upgradectr.WithLatestTag(plan.Status.LatestVersion),
-				upgradectr.WithSecrets(plan.Spec.Secrets),
-				upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
-				upgradectr.WithImagePullPolicy(ImagePullPolicy),
-				upgradectr.WithVolumes(plan.Spec.Prepare.Volumes),
-				upgradectr.WithSecurityContext(plan.Spec.Prepare.SecurityContext),
-			),
+	// Determine if the target node is Windows
+	isWindows := node.Labels["kubernetes.io/os"] == "windows"
+
+	// First, we prepare
+if plan.Spec.Prepare != nil {
+		prepareContainer := upgradectr.New("prepare", *plan.Spec.Prepare,
+			upgradectr.WithLatestTag(plan.Status.LatestVersion),
+			upgradectr.WithSecrets(plan.Spec.Secrets),
+			upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
+			upgradectr.WithImagePullPolicy(ImagePullPolicy),
+			upgradectr.WithVolumes(plan.Spec.Prepare.Volumes),
+			upgradectr.WithSecurityContext(plan.Spec.Prepare.SecurityContext),
 		)
+		if isWindows {
+			if prepareContainer.SecurityContext == nil {
+				prepareContainer.SecurityContext = &corev1.SecurityContext{}
+			}
+			if prepareContainer.SecurityContext.WindowsOptions == nil {
+				prepareContainer.SecurityContext.WindowsOptions = &corev1.WindowsSecurityContextOptions{}
+			}
+			prepareContainer.SecurityContext.WindowsOptions.HostProcess = ptr.To(true)
+			prepareContainer.SecurityContext.WindowsOptions.RunAsUserName = ptr.To("NT AUTHORITY\\SYSTEM")
+		}
+		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, prepareContainer)
 	}
 
-	// then we cordon/drain
+	// Then we cordon/drain
 	cordon, drain := plan.Spec.Cordon, plan.Spec.Drain
 	if drain != nil {
 		controllerRequirement, _ := labels.NewRequirement(upgradeapi.LabelController, selection.DoesNotExist, nil)
@@ -343,8 +356,6 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 			args = append(args, "--ignore-daemonsets")
 		}
 		if (drain.DeleteLocalData == nil || *drain.DeleteLocalData) && (drain.DeleteEmptydirData == nil || *drain.DeleteEmptydirData) {
-			//only available in kubectl version 1.20 or later
-			//was delete-local-data in prior versions
 			args = append(args, "--delete-emptydir-data")
 		}
 		if drain.Force {
@@ -357,46 +368,78 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 			args = append(args, "--grace-period", strconv.FormatInt(int64(*drain.GracePeriod), 10))
 		}
 		if drain.DisableEviction {
-			//only available in kubectl version 1.18 or later
 			args = append(args, "--disable-eviction=true")
 		}
 		if drain.SkipWaitForDeleteTimeout > 0 {
-			//only available in kubectl version 1.18 or later
 			args = append(args, "--skip-wait-for-delete-timeout", strconv.FormatInt(int64(drain.SkipWaitForDeleteTimeout), 10))
 		}
 
-		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers,
-			upgradectr.New("drain", upgradeapiv1.ContainerSpec{
-				Image: KubectlImage,
-				Args:  args,
-			},
-				upgradectr.WithSecrets(plan.Spec.Secrets),
-				upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
-				upgradectr.WithImagePullPolicy(ImagePullPolicy),
-				upgradectr.WithVolumes(plan.Spec.Upgrade.Volumes),
-			),
+		kubectlImage := KubectlImage
+
+		drainContainer := upgradectr.New("drain", upgradeapiv1.ContainerSpec{
+			Image: kubectlImage,
+			Args:  args,
+		},
+			upgradectr.WithSecrets(plan.Spec.Secrets),
+			upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
+			upgradectr.WithImagePullPolicy(ImagePullPolicy),
+			upgradectr.WithVolumes(plan.Spec.Upgrade.Volumes),
 		)
+		if isWindows {
+			if drainContainer.SecurityContext == nil {
+				drainContainer.SecurityContext = &corev1.SecurityContext{}
+			}
+			if drainContainer.SecurityContext.WindowsOptions == nil {
+				drainContainer.SecurityContext.WindowsOptions = &corev1.WindowsSecurityContextOptions{}
+			}
+			drainContainer.SecurityContext.WindowsOptions.HostProcess = ptr.To(true)
+			drainContainer.SecurityContext.WindowsOptions.RunAsUserName = ptr.To("NT AUTHORITY\\SYSTEM")
+		}
+		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, drainContainer)
 	} else if cordon {
-		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers,
-			upgradectr.New("cordon", upgradeapiv1.ContainerSpec{
-				Image: KubectlImage,
-				Args:  []string{"cordon", node.Name},
-			},
-				upgradectr.WithSecrets(plan.Spec.Secrets),
-				upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
-				upgradectr.WithImagePullPolicy(ImagePullPolicy),
-				upgradectr.WithVolumes(plan.Spec.Upgrade.Volumes),
-			),
+		kubectlImage := KubectlImage
+
+		cordonContainer := upgradectr.New("cordon", upgradeapiv1.ContainerSpec{
+			Image: kubectlImage,
+			Args:  []string{"cordon", node.Name},
+		},
+			upgradectr.WithSecrets(plan.Spec.Secrets),
+			upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
+			upgradectr.WithImagePullPolicy(ImagePullPolicy),
+			upgradectr.WithVolumes(plan.Spec.Upgrade.Volumes),
 		)
+		if isWindows {
+			if cordonContainer.SecurityContext == nil {
+				cordonContainer.SecurityContext = &corev1.SecurityContext{}
+			}
+			if cordonContainer.SecurityContext.WindowsOptions == nil {
+				cordonContainer.SecurityContext.WindowsOptions = &corev1.WindowsSecurityContextOptions{}
+			}
+			cordonContainer.SecurityContext.WindowsOptions.HostProcess = ptr.To(true)
+			cordonContainer.SecurityContext.WindowsOptions.RunAsUserName = ptr.To("NT AUTHORITY\\SYSTEM")
+		}
+		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, cordonContainer)
 	}
 
 	// Check if SecurityContext from the Plan is non-nil
 	var securityContext *corev1.SecurityContext
 	if plan.Spec.Upgrade.SecurityContext != nil {
+		// Use security context explicitly provided in the plan
 		securityContext = plan.Spec.Upgrade.SecurityContext
-	} else {
+		logrus.Debugf("got security context %s", securityContext)
+	} else if isWindows {
+		// Set Windows-specific security context (HostProcess, run as SYSTEM)
 		securityContext = &corev1.SecurityContext{
-			Privileged: &Privileged,
+			WindowsOptions: &corev1.WindowsSecurityContextOptions{
+				RunAsUserName: ptr.To("NT AUTHORITY\\SYSTEM"),
+				HostProcess:   ptr.To(true),
+			},
+		}
+	} else {
+		// Default Linux security context
+		privileged := true
+		securityContext = &corev1.SecurityContext{
+			Privileged: &privileged,
 			Capabilities: &corev1.Capabilities{
 				Add: []corev1.Capability{
 					corev1.Capability("CAP_SYS_BOOT"),
@@ -405,17 +448,16 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 		}
 	}
 
-	// and finally, we upgrade
-	podTemplate.Spec.Containers = []corev1.Container{
-		upgradectr.New("upgrade", *plan.Spec.Upgrade,
-			upgradectr.WithLatestTag(plan.Status.LatestVersion),
-			upgradectr.WithSecurityContext(securityContext),
-			upgradectr.WithSecrets(plan.Spec.Secrets),
-			upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
-			upgradectr.WithImagePullPolicy(ImagePullPolicy),
-			upgradectr.WithVolumes(plan.Spec.Upgrade.Volumes),
-		),
-	}
+	// Apply main container (already present in your code, included for completeness)
+	mainContainer := upgradectr.New("upgrade", *plan.Spec.Upgrade,
+		upgradectr.WithLatestTag(plan.Status.LatestVersion),
+		upgradectr.WithSecrets(plan.Spec.Secrets),
+		upgradectr.WithPlanEnvironment(plan.Name, plan.Status),
+		upgradectr.WithImagePullPolicy(ImagePullPolicy),
+		upgradectr.WithVolumes(plan.Spec.Upgrade.Volumes),
+		upgradectr.WithSecurityContext(securityContext),
+	)
+	podTemplate.Spec.Containers = []corev1.Container{mainContainer}
 
 	activeDeadlineSeconds := ActiveDeadlineSeconds
 
@@ -423,8 +465,6 @@ func New(plan *upgradeapiv1.Plan, node *corev1.Node, controllerName string) *bat
 		activeDeadlineSeconds = plan.Spec.JobActiveDeadlineSecs
 	}
 
-	// If configured with a maximum deadline via "SYSTEM_UPGRADE_JOB_ACTIVE_DEADLINE_SECONDS_MAX",
-	// clamp the Plan's given deadline to the maximum.
 	if ActiveDeadlineSecondsMax > 0 && activeDeadlineSeconds > ActiveDeadlineSecondsMax {
 		activeDeadlineSeconds = ActiveDeadlineSecondsMax
 	}
