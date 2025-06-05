@@ -1,0 +1,33 @@
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: windows-upgrade
+  namespace: system-upgrade
+spec:
+  version: windows-upgrade-1
+  concurrency: 1
+  nodeSelector:
+    matchExpressions:
+      - key: os-patch-window
+        operator: In
+        values: ["true"]
+      - key: kubernetes.io/os
+        operator: In
+        values: ["windows"]
+  serviceAccountName: system-upgrade
+  secrets:
+    - name: windows-upgrade
+  drain:
+    force: true
+    ignoreDaemonSets: true
+    skipWaitForDeleteTimeout: 60
+  upgrade:
+    image: cr.test.teamplay.siemens-healthineers.com/shs/teamplay/edgev2/hpc:0.1
+    command: ["powershell.exe"]
+    args:
+      - "-File"
+      - "c:\\upgrade.ps1"
+    securityContext:
+      windowsOptions:
+        runAsUserName: "NT AUTHORITY\\SYSTEM"
+        hostProcess: true
