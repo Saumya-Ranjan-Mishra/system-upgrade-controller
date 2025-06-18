@@ -379,7 +379,7 @@ if plan.Spec.Prepare != nil {
 		if isWindows {
 			kubectlImage = os.Getenv("SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS")
 			if kubectlImage == "" {
-				return fmt.Errorf("SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS is a required environment variable when targeting Windows")
+				logrus.Fatal("SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS is a required environment variable when targeting Windows")
 			}
 		}
 
@@ -404,7 +404,7 @@ if plan.Spec.Prepare != nil {
 		}
 		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, drainContainer)
 	} else if cordon {
-		kubectlImage := KubectlImage
+		//kubectlImage := KubectlImage
 
 		cordonContainer := upgradectr.New("cordon", upgradeapiv1.ContainerSpec{
 			Image: kubectlImage,
