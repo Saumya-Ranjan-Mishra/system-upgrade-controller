@@ -376,6 +376,13 @@ if plan.Spec.Prepare != nil {
 
 		kubectlImage := KubectlImage
 
+		if isWindows {
+			kubectlImage = os.Getenv("SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS")
+			if kubectlImage == "" {
+				return fmt.Errorf("SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS is a required environment variable when targeting Windows")
+			}
+		}
+
 		drainContainer := upgradectr.New("drain", upgradeapiv1.ContainerSpec{
 			Image: kubectlImage,
 			Args:  args,
