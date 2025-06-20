@@ -404,7 +404,14 @@ if plan.Spec.Prepare != nil {
 		}
 		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, drainContainer)
 	} else if cordon {
-		//kubectlImage := KubectlImage
+		kubectlImage := KubectlImage
+
+		if isWindows {
+			kubectlImage = os.Getenv("SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS")
+			if kubectlImage == "" {
+				logrus.Fatal("SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS is a required environment variable when targeting Windows")
+			}
+		}
 
 		cordonContainer := upgradectr.New("cordon", upgradeapiv1.ContainerSpec{
 			Image: kubectlImage,
